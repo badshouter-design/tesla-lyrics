@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <title>가사 디스플레이</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg2: #141414;
+      --bg3: #1e1e1e;
+      --fg: #e8e8e8;
+      --fg-dim: #6a6a6a;
+      --fg-mid: #9a9a9a;
+      --accent: #1db954;
+      --accent-bright: #1ed760;
+      --danger: #e74c3c;
+      --touch: 64px;
+      --font-base: 28px;
+      --font-current: 40px;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    /* Header / Search */
+    .topbar {
+      flex-shrink: 0;
+      padding: 16px 20px;
+      background: var(--bg2);
+      border-bottom: 1px solid #222;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      z-index: 10;
+    }
+    .search-wrap { flex: 1; display: flex; gap: 10px; }
+    #searchInput {
+      flex: 1;
+      height: var(--touch);
+      font-size: 22px;
+      padding: 0 20px;
+      border-radius: var(--radius);
+      border: 2px solid #333;
+      background: var(--bg3);
+      color: var(--fg);
+      outline: none;
+    }
+    #searchInput:focus { border-color: var(--accent); }
+    .btn {
+      height: var(--touch);
+      min-width: var(--touch);
+      padding: 0 22px;
+      font-size: 20px;
+      font-weight: 600;
+      border: none;
+      border-radius: var(--radius);
+      background: var(--bg3);
+      color: var(--fg);
+      cursor: pointer;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      user-select: none;
+    }
+    .btn:active { transform: scale(0.97); opacity: 0.9; }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-primary:hover, .btn-primary.active { background: var(--accent-bright); }
+    .btn-ghost { background: transparent; border: 2px solid #333; }
+    .btn-sm { height: 52px; min-width: 52px; font-size: 18px; padding: 0 16px; }
+    .btn.playing { background: var(--danger); color: #fff; }
+
+    /* Panels */
+    .main { flex: 1; display: flex; overflow: hidden; position: relative; }
+    .hidden { display: none !important; }
+    .panel {
+      position: absolute;
+      inset: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 20px;
+      z-index: 1;
+    }
+    #searchPanel { z-index: 2; }
+    #playerPanel { z-index: 3; padding: 0; }
+    .panel.hidden { display: none !important; pointer-events: none !important; }
+
+    /* Results */
+    .result-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 18px 20px;
+      margin-bottom: 10px;
+      background: var(--bg2);
+      border-radius: var(--radius);
+      border: 2px solid transparent;
+      cursor: pointer;
+      min-height: 80px;
+    }
+    .result-item:active, .result-item:hover { border-color: var(--accent); background: var(--bg3); }
+    .result-title { font-size: 24px; font-weight: 700; }
+    .result-meta { font-size: 18px; color: var(--fg-mid); }
+    .badge {
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 8px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    .badge-sync { background: var(--accent); color: #000; }
+    .badge-plain { background: #444; color: #ccc; }
+    .section-title {
+      font-size: 18px;
+      color: var(--fg-dim);
+      margin: 8px 0 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .empty, .loading, .error {
+      text-align: center;
+      padding: 60px 20px;
+      font-size: 22px;
+      color: var(--fg-dim);
+    }
+    .error { color: var(--danger); }
+
+    /* Player */
+    #playerPanel:not(.hidden) { display: flex; flex-direction: column; }
+    .player-header {
+      flex-shrink: 0;
+      padding: 14px 20px;
+      background: linear-gradient(180deg, var(--bg2) 0%, transparent 100%);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      z-index: 5;
+    }
+    .song-info { flex: 1; min-width: 0; }
+    .song-title { font-size: 26px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .song-artist { font-size: 18px; color: var(--fg-mid); margin-top: 4px; }
+
+    .lyrics-viewport {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      scroll-behavior: smooth;
+      position: relative;
+      mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
+    }
+    .lyrics-spacer { height: 40vh; }
+    .lyric-line {
+      text-align: center;
+      padding: 14px 32px;
+      font-size: var(--font-base);
+      line-height: 1.45;
+      color: var(--fg-dim);
+      cursor: pointer;
+      transition: color 0.25s, font-size 0.25s, opacity 0.25s, transform 0.25s;
+      opacity: 0.45;
+      user-select: none;
+    }
+    .lyric-line.near { opacity: 0.7; color: var(--fg-mid); }
+    .lyric-line.active {
+      color: #fff;
+      font-size: var(--font-current);
+      font-weight: 700;
+      opacity: 1;
+      transform: scale(1.02);
+      text-shadow: 0 0 24px rgba(29, 185, 84, 0.35);
+    }
+    .lyric-line:active { background: rgba(255,255,255,0.05); border-radius: 12px; }
+    .plain-lyrics {
+      white-space: pre-wrap;
+      text-align: center;
+      font-size: var(--font-base);
+      line-height: 1.8;
+      color: var(--fg-mid);
+      padding: 40px 32px 120px;
+    }
+
+    /* Controls */
+    .controls {
+      flex-shrink: 0;
+      padding: 16px 20px 24px;
+      background: linear-gradient(0deg, var(--bg) 60%, transparent 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 5;
+    }
+    .clock-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-variant-numeric: tabular-nums;
+    }
+    #clock {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      min-width: 140px;
+      text-align: center;
+    }
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .offset-label { font-size: 16px; color: var(--fg-dim); min-width: 90px; text-align: center; }
+
+    /* Fullscreen player hides topbar search */
+    body.fs-mode .topbar { display: none; }
+    body.fs-mode .player-header { padding-top: 20px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="topbar" id="topbar">
+      <div class="search-wrap">
+        <input id="searchInput" type="search" placeholder="곡명 · 아티스트 검색 (예: IU Love wins all)" autocomplete="off" enterkeyhint="search" />
+        <button class="btn btn-primary" id="searchBtn" type="button">검색</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="backBtn" type="button" style="display:none">← 목록</button>
+    </div>
+
+    <div class="main">
+      <div class="panel" id="searchPanel">
+        <div id="recentSection" style="display:none">
+          <div class="section-title">최근 곡</div>
+          <div id="recentList"></div>
+        </div>
+        <div id="resultsSection">
+          <div class="empty" id="emptyState">곡을 검색한 뒤, 노래가 시작할 때 ▶ 시작 을 누르세요.</div>
+          <div class="loading hidden" id="loadingState">검색 중…</div>
+          <div class="error hidden" id="errorState"></div>
+          <div id="resultsList"></div>
+        </div>
+      </div>
+
+      <div class="panel hidden" id="playerPanel" style="padding:0">
+        <div class="player-header">
+          <div class="song-info">
+            <div class="song-title" id="songTitle">—</div>
+            <div class="song-artist" id="songArtist">—</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-shrink:0">
+            <button class="btn btn-ghost btn-sm" id="fontMinus" type="button" title="글자 작게">A−</button>
+            <button class="btn btn-ghost btn-sm" id="fontPlus" type="button" title="글자 크게">A+</button>
+            <button class="btn btn-ghost btn-sm" id="fsBtn" type="button">⛶ 전체화면</button>
+          </div>
+        </div>
+        <div class="lyrics-viewport" id="lyricsViewport">
+          <div class="lyrics-spacer"></div>
+          <div id="lyricsBody"></div>
+          <div class="lyrics-spacer"></div>
+        </div>
+        <div class="controls">
+          <div class="clock-row">
+            <button class="btn btn-sm" id="seekBack" type="button">−5초</button>
+            <div id="clock">0:00.0</div>
+            <button class="btn btn-sm" id="seekFwd" type="button">+5초</button>
+          </div>
+          <div class="control-row">
+            <button class="btn btn-sm" id="offsetMinus" type="button">−0.5초</button>
+            <span class="offset-label" id="offsetLabel">오프셋 0.0초</span>
+            <button class="btn btn-sm" id="offsetPlus" type="button">+0.5초</button>
+          </div>
+          <div class="control-row">
+            <button class="btn btn-primary" id="playBtn" type="button" style="min-width:200px;height:72px;font-size:24px">▶ 시작</button>
+            <button class="btn btn-ghost" id="resetBtn" type="button">↻ 리셋</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  const API = 'https://lrclib.net/api';
+  const LS_RECENT = 'lyrics_recent_v1';
+  const LS_OFFSET = 'lyrics_offset_v1';
+  const LS_FONT = 'lyrics_font_v1';
+  const MAX_RECENT = 12;
+
+  /** @typedef {{ time: number, text: string }} LyricLine */
+  /** @typedef {{ id: number, title: string, artist: string, album: string, duration: number, synced: boolean, plainLyrics?: string, syncedLyrics?: string }} Song */
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    searchInput: $('searchInput'),
+    searchBtn: $('searchBtn'),
+    backBtn: $('backBtn'),
+    searchPanel: $('searchPanel'),
+    playerPanel: $('playerPanel'),
+    recentSection: $('recentSection'),
+    recentList: $('recentList'),
+    resultsList: $('resultsList'),
+    emptyState: $('emptyState'),
+    loadingState: $('loadingState'),
+    errorState: $('errorState'),
+    songTitle: $('songTitle'),
+    songArtist: $('songArtist'),
+    lyricsViewport: $('lyricsViewport'),
+    lyricsBody: $('lyricsBody'),
+    clock: $('clock'),
+    playBtn: $('playBtn'),
+    resetBtn: $('resetBtn'),
+    offsetMinus: $('offsetMinus'),
+    offsetPlus: $('offsetPlus'),
+    offsetLabel: $('offsetLabel'),
+    seekBack: $('seekBack'),
+    seekFwd: $('seekFwd'),
+    fontMinus: $('fontMinus'),
+    fontPlus: $('fontPlus'),
+    fsBtn: $('fsBtn'),
+  };
+
+  let currentSong = null;
+  /** @type {LyricLine[]} */
+  let lines = [];
+  let isSynced = false;
+  let playing = false;
+  let baseTime = 0;       // song position (sec) at last play/pause
+  let baseWall = 0;       // performance.now() at last play
+  let offset = 0;         // user offset seconds
+  let activeIdx = -1;
+  let rafId = 0;
+  let fontScale = 1;
+
+  // ---------- LRC parser ----------
+  function parseTimeTag(tag) {
+    // mm:ss.xx or mm:ss.xxx or mm:ss
+    const m = tag.match(/^(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?$/);
+    if (!m) return null;
+    const min = parseInt(m[1], 10);
+    const sec = parseInt(m[2], 10);
+    let frac = 0;
+    if (m[3] != null) {
+      const f = m[3];
+      frac = parseInt(f, 10) / Math.pow(10, f.length);
+    }
+    return min * 60 + sec + frac;
+  }
+
+  /**
+   * Parse LRC text into sorted lyric lines.
+   * Supports multiple timestamps per line and [offset:±ms] tag.
+   * @param {string} lrc
+   * @returns {{ lines: LyricLine[], offsetMs: number }}
+   */
+  function parseLRC(lrc) {
+    if (!lrc) return { lines: [], offsetMs: 0 };
+    let offsetMs = 0;
+    /** @type {LyricLine[]} */
+    const out = [];
+    const raw = lrc.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const lineRe = /\[([^\]]+)\]/g;
+
+    for (const rawLine of raw) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      // metadata / offset
+      const meta = line.match(/^\[(ti|ar|al|by|offset|re|ve|length):([^\]]*)\]$/i);
+      if (meta) {
+        if (meta[1].toLowerCase() === 'offset') {
+          offsetMs = parseInt(meta[2].trim(), 10) || 0;
+        }
+        continue;
+      }
+
+      const tags = [];
+      let lastIdx = 0;
+      let m;
+      lineRe.lastIndex = 0;
+      while ((m = lineRe.exec(line)) !== null) {
+        const t = parseTimeTag(m[1]);
+        if (t != null) {
+          tags.push(t);
+          lastIdx = m.index + m[0].length;
+        } else {
+          // non-time tag mid-line — stop treating as lyric tags
+          break;
+        }
+      }
+      if (!tags.length) continue;
+      const text = line.slice(lastIdx).trim();
+      for (const t of tags) {
+        out.push({ time: t, text });
+      }
+    }
+
+    out.sort((a, b) => a.time - b.time || a.text.localeCompare(b.text));
+    return { lines: out, offsetMs };
+  }
+
+  // Expose for node test
+  window.__parseLRC = parseLRC;
+
+  // ---------- Time helpers ----------
+  function formatTime(sec) {
+    if (!isFinite(sec) || sec < 0) sec = 0;
+    const m = Math.floor(sec / 60);
+    const s = sec - m * 60;
+    return m + ':' + s.toFixed(1).padStart(4, '0');
+  }
+
+  function nowPos() {
+    if (!playing) return baseTime;
+    return baseTime + (performance.now() - baseWall) / 1000;
+  }
+
+  function effectivePos() {
+    return nowPos() + offset;
+  }
+
+  // ---------- Storage ----------
+  function loadRecent() {
+    try { return JSON.parse(localStorage.getItem(LS_RECENT) || '[]'); }
+    catch { return []; }
+  }
+  function saveRecent(song) {
+    const list = loadRecent().filter((s) => s.id !== song.id);
+    list.unshift({
+      id: song.id,
+      title: song.title,
+      artist: song.artist,
+      album: song.album,
+      duration: song.duration,
+      synced: song.synced,
+    });
+    localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, MAX_RECENT)));
+  }
+  function loadOffsets() {
+    try { return JSON.parse(localStorage.getItem(LS_OFFSET) || '{}'); }
+    catch { return {}; }
+  }
+  function saveOffset(songId, val) {
+    const o = loadOffsets();
+    o[String(songId)] = val;
+    localStorage.setItem(LS_OFFSET, JSON.stringify(o));
+  }
+  function getOffset(songId) {
+    const o = loadOffsets();
+    const v = o[String(songId)];
+    return typeof v === 'number' ? v : 0;
+  }
+
+  // ---------- Font ----------
+  function applyFont() {
+    const base = Math.round(28 * fontScale);
+    const cur = Math.round(40 * fontScale);
+    document.documentElement.style.setProperty('--font-base', base + 'px');
+    document.documentElement.style.setProperty('--font-current', cur + 'px');
+    localStorage.setItem(LS_FONT, String(fontScale));
+  }
+  try {
+    const f = parseFloat(localStorage.getItem(LS_FONT) || '1');
+    if (isFinite(f) && f >= 0.7 && f <= 2) fontScale = f;
+  } catch {}
+  applyFont();
+
+  // ---------- UI: search ----------
+  function showSearch() {
+    els.searchPanel.classList.remove('hidden');
+    els.playerPanel.classList.add('hidden');
+    els.backBtn.style.display = 'none';
+    stopPlayback(false);
+    renderRecent();
+  }
+
+  function setLoading(on) {
+    els.loadingState.classList.toggle('hidden', !on);
+    els.emptyState.classList.add('hidden');
+    if (on) {
+      els.errorState.classList.add('hidden');
+      els.resultsList.innerHTML = '';
+    }
+  }
+
+  function showError(msg) {
+    els.errorState.textContent = msg;
+    els.errorState.classList.remove('hidden');
+    els.loadingState.classList.add('hidden');
+    els.emptyState.classList.add('hidden');
+  }
+
+  function renderSongCard(song, container) {
+    const el = document.createElement('div');
+    el.className = 'result-item';
+    const dur = song.duration ? formatDuration(song.duration) : '';
+    const badge = song.synced
+      ? '<span class="badge badge-sync">싱크</span>'
+      : '<span class="badge badge-plain">일반</span>';
+    el.innerHTML =
+      '<div class="result-title">' + escapeHtml(song.title) + badge + '</div>' +
+      '<div class="result-meta">' + escapeHtml(song.artist) +
+      (song.album ? ' · ' + escapeHtml(song.album) : '') +
+      (dur ? ' · ' + dur : '') + '</div>';
+    el.addEventListener('click', () => openSong(song));
+    container.appendChild(el);
+  }
+
+  function formatDuration(sec) {
+    const s = Math.round(Number(sec) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m + ':' + String(r).padStart(2, '0');
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function normalizeResult(r) {
+    return {
+      id: r.id,
+      title: r.trackName || r.name || '제목 없음',
+      artist: r.artistName || '아티스트 미상',
+      album: r.albumName || '',
+      duration: r.duration || 0,
+      synced: !!(r.syncedLyrics) || r.hasSyncedLyrics === true,
+      plainLyrics: r.plainLyrics || null,
+      syncedLyrics: r.syncedLyrics || null,
+    };
+  }
+
+  async function doSearch() {
+    const q = els.searchInput.value.trim();
+    if (!q) return;
+    setLoading(true);
+    try {
+      const res = await fetch(API + '/search?q=' + encodeURIComponent(q));
+      if (!res.ok) throw new Error('검색 실패 (' + res.status + ')');
+      const data = await res.json();
+      els.loadingState.classList.add('hidden');
+      els.resultsList.innerHTML = '';
+      if (!data || !data.length) {
+        els.emptyState.textContent = '검색 결과가 없습니다.';
+        els.emptyState.classList.remove('hidden');
+        return;
+      }
+      els.emptyState.classList.add('hidden');
+      // Prefer items with synced lyrics first
+      const mapped = data.map(normalizeResult);
+      mapped.sort((a, b) => (b.synced ? 1 : 0) - (a.synced ? 1 : 0));
+      const title = document.createElement('div');
+      title.className = 'section-title';
+      title.textContent = '검색 결과 (' + mapped.length + ')';
+      els.resultsList.appendChild(title);
+      mapped.forEach((s) => renderSongCard(s, els.resultsList));
+    } catch (e) {
+      showError('검색 오류: ' + (e.message || e));
+    }
+  }
+
+  function renderRecent() {
+    const list = loadRecent();
+    els.recentList.innerHTML = '';
+    if (!list.length) {
+      els.recentSection.style.display = 'none';
+      return;
+    }
+    els.recentSection.style.display = '';
+    list.forEach((s) => renderSongCard(s, els.recentList));
+  }
+
+  // ---------- Player ----------
+  async function openSong(songStub) {
+    els.errorState.classList.add('hidden');
+    setLoading(true);
+    showSearch(); // keep panel until loaded
+    try {
+      // Always fetch full record by id (search payloads vary)
+      const res = await fetch(API + '/get/' + encodeURIComponent(songStub.id));
+      if (!res.ok) throw new Error('가사 불러오기 실패 (' + res.status + ')');
+      const data = await res.json();
+      const full = normalizeResult(data);
+      currentSong = full;
+      saveRecent(full);
+      offset = getOffset(full.id);
+      updateOffsetLabel();
+
+      lines = [];
+      isSynced = false;
+      if (full.syncedLyrics) {
+        const parsed = parseLRC(full.syncedLyrics);
+        lines = parsed.lines.map((l) => ({
+          time: l.time + parsed.offsetMs / 1000,
+          text: l.text,
+        }));
+        isSynced = lines.length > 0;
+      }
+
+      els.songTitle.textContent = full.title;
+      els.songArtist.textContent = full.artist + (full.album ? ' · ' + full.album : '');
+      renderLyrics();
+      baseTime = 0;
+      playing = false;
+      updatePlayBtn();
+      updateClock();
+      activeIdx = -1;
+
+      els.searchPanel.classList.add('hidden');
+      els.playerPanel.classList.remove('hidden');
+      els.backBtn.style.display = '';
+      els.loadingState.classList.add('hidden');
+    } catch (e) {
+      showError('불러오기 오류: ' + (e.message || e));
+    }
+  }
+
+  function renderLyrics() {
+    const body = els.lyricsBody;
+    body.innerHTML = '';
+    if (isSynced) {
+      lines.forEach((line, i) => {
+        const div = document.createElement('div');
+        div.className = 'lyric-line';
+        div.dataset.idx = String(i);
+        div.textContent = line.text || '♪';
+        div.addEventListener('click', () => seekToLine(i));
+        body.appendChild(div);
+      });
+    } else {
+      const plain = document.createElement('div');
+      plain.className = 'plain-lyrics';
+      plain.textContent = (currentSong && currentSong.plainLyrics) || '(가사가 없습니다)';
+      body.appendChild(plain);
+    }
+    els.lyricsViewport.scrollTop = 0;
+  }
+
+  function seekToLine(i) {
+    if (!isSynced || i < 0 || i >= lines.length) return;
+    const t = Math.max(0, lines[i].time - offset);
+    baseTime = t;
+    baseWall = performance.now();
+    highlight(i, true);
+    updateClock();
+  }
+
+  function findActiveIndex(pos) {
+    if (!lines.length) return -1;
+    // last line whose time <= pos
+    let lo = 0, hi = lines.length - 1, ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (lines[mid].time <= pos) {
+        ans = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return ans;
+  }
+
+  function highlight(idx, forceScroll) {
+    const kids = els.lyricsBody.children;
+    if (activeIdx === idx && !forceScroll) return;
+    if (activeIdx >= 0 && kids[activeIdx]) {
+      kids[activeIdx].classList.remove('active', 'near');
+    }
+    // clear near classes nearby
+    for (let i = Math.max(0, activeIdx - 2); i <= Math.min(kids.length - 1, activeIdx + 2); i++) {
+      if (kids[i]) kids[i].classList.remove('near');
+    }
+    activeIdx = idx;
+    if (idx < 0) return;
+    if (kids[idx]) {
+      kids[idx].classList.add('active');
+      kids[idx].classList.remove('near');
+    }
+    if (kids[idx - 1]) kids[idx - 1].classList.add('near');
+    if (kids[idx + 1]) kids[idx + 1].classList.add('near');
+
+    // Keep current line centered
+    const el = kids[idx];
+    if (el) {
+      const vp = els.lyricsViewport;
+      const target = el.offsetTop - vp.clientHeight / 2 + el.offsetHeight / 2;
+      if (forceScroll || Math.abs(vp.scrollTop - target) > 8) {
+        vp.scrollTo({ top: target, behavior: forceScroll ? 'auto' : 'smooth' });
+      }
+    }
+  }
+
+  function tick() {
+    const pos = effectivePos();
+    updateClock();
+    if (isSynced) {
+      const idx = findActiveIndex(pos);
+      highlight(idx, false);
+    }
+    if (playing) rafId = requestAnimationFrame(tick);
+  }
+
+  function updateClock() {
+    els.clock.textContent = formatTime(nowPos());
+  }
+
+  function updateOffsetLabel() {
+    const sign = offset > 0 ? '+' : '';
+    els.offsetLabel.textContent = '오프셋 ' + sign + offset.toFixed(1) + '초';
+  }
+
+  function updatePlayBtn() {
+    if (playing) {
+      els.playBtn.textContent = '⏸ 일시정지';
+      els.playBtn.classList.add('playing');
+      els.playBtn.classList.remove('btn-primary');
+    } else {
+      els.playBtn.textContent = baseTime > 0.05 ? '▶ 계속' : '▶ 시작';
+      els.playBtn.classList.remove('playing');
+      els.playBtn.classList.add('btn-primary');
+    }
+  }
+
+  function startPlayback() {
+    if (playing) return;
+    playing = true;
+    baseWall = performance.now();
+    updatePlayBtn();
+    cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function pausePlayback() {
+    if (!playing) return;
+    baseTime = nowPos();
+    playing = false;
+    updatePlayBtn();
+    cancelAnimationFrame(rafId);
+    updateClock();
+  }
+
+  function stopPlayback(resetTime) {
+    playing = false;
+    cancelAnimationFrame(rafId);
+    if (resetTime) baseTime = 0;
+    updatePlayBtn();
+    updateClock();
+  }
+
+  function togglePlay() {
+    if (playing) pausePlayback();
+    else startPlayback();
+  }
+
+  function adjustOffset(delta) {
+    offset = Math.round((offset + delta) * 10) / 10;
+    updateOffsetLabel();
+    if (currentSong) saveOffset(currentSong.id, offset);
+    if (isSynced) highlight(findActiveIndex(effectivePos()), false);
+  }
+
+  function seekBy(delta) {
+    baseTime = Math.max(0, nowPos() + delta);
+    baseWall = performance.now();
+    updateClock();
+    if (isSynced) highlight(findActiveIndex(effectivePos()), true);
+  }
+
+  // ---------- Fullscreen ----------
+  async function toggleFullscreen() {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        document.body.classList.add('fs-mode');
+      } else {
+        await document.exitFullscreen();
+        document.body.classList.remove('fs-mode');
+      }
+    } catch (e) {
+      // Fallback: just hide chrome
+      document.body.classList.toggle('fs-mode');
+    }
+  }
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) document.body.classList.remove('fs-mode');
+    else document.body.classList.add('fs-mode');
+  });
+
+  // ---------- Events ----------
+  els.searchBtn.addEventListener('click', doSearch);
+  els.searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSearch();
+  });
+  els.backBtn.addEventListener('click', showSearch);
+  els.playBtn.addEventListener('click', togglePlay);
+  els.resetBtn.addEventListener('click', () => {
+    stopPlayback(true);
+    activeIdx = -1;
+    highlight(-1, true);
+    const kids = els.lyricsBody.querySelectorAll('.lyric-line');
+    kids.forEach((k) => k.classList.remove('active', 'near'));
+    els.lyricsViewport.scrollTop = 0;
+  });
+  els.offsetMinus.addEventListener('click', () => adjustOffset(-0.5));
+  els.offsetPlus.addEventListener('click', () => adjustOffset(0.5));
+  els.seekBack.addEventListener('click', () => seekBy(-5));
+  els.seekFwd.addEventListener('click', () => seekBy(5));
+  els.fontMinus.addEventListener('click', () => {
+    fontScale = Math.max(0.7, Math.round((fontScale - 0.1) * 10) / 10);
+    applyFont();
+  });
+  els.fontPlus.addEventListener('click', () => {
+    fontScale = Math.min(2, Math.round((fontScale + 0.1) * 10) / 10);
+    applyFont();
+  });
+  els.fsBtn.addEventListener('click', toggleFullscreen);
+
+  // Init
+  renderRecent();
+
+  // Node/test hook
+  window.__lyricsApp = { parseLRC, formatTime, findActiveIndex: (pos, ls) => {
+    const prev = lines; lines = ls || lines;
+    const r = findActiveIndex(pos);
+    lines = prev;
+    return r;
+  }};
+})();
+</script>
+</body>
+</html>
