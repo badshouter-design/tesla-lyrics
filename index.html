@@ -230,6 +230,12 @@
     /* Fullscreen player hides topbar search */
     body.fs-mode .topbar { display: none; }
     body.fs-mode .player-header { padding-top: 20px; }
+    .sp-status { flex-shrink:0; padding:10px 20px; font-size:20px; color:var(--fg-mid); background:#0f0f0f; border-bottom:1px solid #222; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sp-status.on { color: var(--accent-bright); }
+    .sp-settings { flex-shrink:0; display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:14px 20px; background:var(--bg2); font-size:18px; }
+    .sp-settings input { flex:1; min-width:320px; height:52px; font-size:20px; padding:0 14px; border-radius:12px; border:2px solid #333; background:var(--bg3); color:var(--fg); }
+    .sp-hint { color:var(--fg-dim); font-size:16px; width:100%; }
+    body.fs-mode .sp-status { font-size:16px; }
   </style>
 </head>
 <body>
@@ -239,9 +245,18 @@
         <input id="searchInput" type="search" placeholder="곡명 · 아티스트 검색 (예: IU Love wins all)" autocomplete="off" enterkeyhint="search" />
         <button class="btn btn-primary" id="searchBtn" type="button">검색</button>
       </div>
+      <button class="btn btn-sm" id="spBtn" type="button" style="background:#1db954;color:#000">🎵 Spotify 연결</button>
+      <button class="btn btn-ghost btn-sm" id="spSettingsBtn" type="button" title="설정">⚙</button>
       <button class="btn btn-ghost btn-sm" id="backBtn" type="button" style="display:none">← 목록</button>
     </div>
 
+    <div id="spStatus" class="sp-status">Spotify 미연결 · 수동 모드</div>
+    <div id="spSettings" class="sp-settings hidden">
+      <label for="spClientId">Spotify Client ID</label>
+      <input id="spClientId" type="text" autocomplete="off" placeholder="Spotify 개발자 대시보드의 Client ID" />
+      <button class="btn btn-primary btn-sm" id="spSaveId" type="button">저장</button>
+      <span class="sp-hint">Redirect URI: <code id="spRedirect"></code></span>
+    </div>
     <div class="main">
       <div class="panel" id="searchPanel">
         <div id="recentSection" style="display:none">
@@ -294,6 +309,8 @@
   </div>
 
 <script>
+// Spotify 앱 Client ID (비워두면 설정 입력값 사용)
+const SPOTIFY_CLIENT_ID = '';
 (function () {
   'use strict';
 
@@ -591,15 +608,7 @@
   }
 
   // ---------- Player ----------
-  async function openSong(songStub) {
-    els.errorState.classList.add('hidden');
-    setLoading(true);
-    showSearch(); // keep panel until loaded
-    try {
-      // Always fetch full record by id (search payloads vary)
-      const res = await fetch(API + '/get/' + encodeURIComponent(songStub.id));
-      if (!res.ok) throw new Error('가사 불러오기 실패 (' + res.status + ')');
-      const data = await res.json();
+  function showSongData(data) {
       const full = normalizeResult(data);
       currentSong = full;
       saveRecent(full);
@@ -629,6 +638,20 @@
       els.searchPanel.classList.add('hidden');
       els.playerPanel.classList.remove('hidden');
       els.backBtn.style.display = '';
+      els.loadingState.classList.add('hidden');
+      return full;
+  }
+
+  async function openSong(songStub) {
+    els.errorState.classList.add('hidden');
+    setLoading(true);
+    showSearch(); // keep panel until loaded
+    try {
+      // Always fetch full record by id (search payloads vary)
+      const res = await fetch(API + '/get/' + encodeURIComponent(songStub.id));
+      if (!res.ok) throw new Error('가사 불러오기 실패 (' + res.status + ')');
+      const data = await res.json();
+      showSongData(data);
       els.loadingState.classList.add('hidden');
     } catch (e) {
       showError('불러오기 오류: ' + (e.message || e));
@@ -835,6 +858,214 @@
     applyFont();
   });
   els.fsBtn.addEventListener('click', toggleFullscreen);
+
+
+  // ---------- Spotify auto-sync (PKCE) ----------
+  const SP_LS = { cid: 'sp_client_id', tok: 'sp_tokens_v1', ver: 'sp_pkce_verifier', st: 'sp_pkce_state' };
+  const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
+  const redirectUri = () => location.origin + location.pathname;
+  const spClientId = () => SPOTIFY_CLIENT_ID || localStorage.getItem(SP_LS.cid) || '';
+
+  function b64url(bytes) {
+    let s = '';
+    bytes.forEach((b) => (s += String.fromCharCode(b)));
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function randomVerifier(len = 64) {
+    const cs = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    const r = crypto.getRandomValues(new Uint8Array(len));
+    return Array.from(r, (x) => cs[x % cs.length]).join('');
+  }
+  async function codeChallenge(verifier) {
+    const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    return b64url(new Uint8Array(d));
+  }
+  /** Position (sec) from a Spotify payload fetched at fetchedAt (ms epoch). */
+  function spotifyPosition(progressMs, isPlaying, fetchedAt, now) {
+    const p = progressMs + (isPlaying ? Math.max(0, now - fetchedAt) : 0);
+    return p / 1000;
+  }
+
+  let spTokens = null;
+  try { spTokens = JSON.parse(localStorage.getItem(SP_LS.tok) || 'null'); } catch {}
+  let spTimer = 0, spDelay = 3000, spTrackId = null, spLoading = false;
+
+  function setStatus(msg, on) {
+    $('spStatus').textContent = msg;
+    $('spStatus').classList.toggle('on', !!on);
+  }
+  function saveTokens(j) {
+    spTokens = {
+      access: j.access_token,
+      refresh: j.refresh_token || (spTokens && spTokens.refresh),
+      exp: Date.now() + (j.expires_in || 3600) * 1000,
+    };
+    localStorage.setItem(SP_LS.tok, JSON.stringify(spTokens));
+  }
+  async function tokenRequest(params) {
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(Object.assign({ client_id: spClientId() }, params)),
+    });
+    if (!res.ok) throw new Error('토큰 오류 ' + res.status);
+    saveTokens(await res.json());
+  }
+  async function ensureToken() {
+    if (!spTokens) throw new Error('미연결');
+    if (Date.now() > spTokens.exp - 60000) {
+      await tokenRequest({ grant_type: 'refresh_token', refresh_token: spTokens.refresh });
+    }
+    return spTokens.access;
+  }
+  async function spConnect() {
+    if (spTokens) { spDisconnect(); return; }
+    if (!spClientId()) {
+      $('spSettings').classList.remove('hidden');
+      setStatus('먼저 Spotify Client ID를 입력하세요');
+      return;
+    }
+    const v = randomVerifier();
+    const state = randomVerifier(16);
+    localStorage.setItem(SP_LS.ver, v);
+    localStorage.setItem(SP_LS.st, state);
+    const q = new URLSearchParams({
+      response_type: 'code', client_id: spClientId(), scope: SP_SCOPES,
+      redirect_uri: redirectUri(), code_challenge_method: 'S256',
+      code_challenge: await codeChallenge(v), state,
+    });
+    location.href = 'https://accounts.spotify.com/authorize?' + q;
+  }
+  function spDisconnect() {
+    clearTimeout(spTimer);
+    spTokens = null; spTrackId = null;
+    localStorage.removeItem(SP_LS.tok);
+    stopPlayback(false);
+    updateSpUi();
+  }
+  function updateSpUi() {
+    $('spBtn').textContent = spTokens ? '연결 해제' : '🎵 Spotify 연결';
+    if (!spTokens) setStatus('Spotify 미연결 · 수동 모드');
+  }
+  async function handleRedirect() {
+    const u = new URL(location.href);
+    const code = u.searchParams.get('code');
+    const err = u.searchParams.get('error');
+    if (!code && !err) return;
+    history.replaceState(null, '', redirectUri());
+    if (err) { setStatus('Spotify 연결 취소/오류: ' + err); return; }
+    if (u.searchParams.get('state') !== localStorage.getItem(SP_LS.st)) {
+      setStatus('Spotify 인증 state 불일치 — 다시 시도하세요'); return;
+    }
+    try {
+      await tokenRequest({
+        grant_type: 'authorization_code', code, redirect_uri: redirectUri(),
+        code_verifier: localStorage.getItem(SP_LS.ver) || '',
+      });
+    } catch (e) { setStatus('Spotify 연결 실패: ' + e.message); }
+    localStorage.removeItem(SP_LS.ver); localStorage.removeItem(SP_LS.st);
+  }
+
+  async function lrclibLookup(track) {
+    const artist = (track.artists || []).map((a) => a.name)[0] || '';
+    const q = new URLSearchParams({
+      track_name: track.name, artist_name: artist,
+      album_name: (track.album && track.album.name) || '',
+      duration: String(Math.round(track.duration_ms / 1000)),
+    });
+    try {
+      const r = await fetch(API + '/get?' + q);
+      if (r.ok) { const j = await r.json(); if (j && (j.syncedLyrics || j.plainLyrics)) return j; }
+    } catch {}
+    const r2 = await fetch(API + '/search?' + new URLSearchParams({ track_name: track.name, artist_name: artist }));
+    let list = r2.ok ? await r2.json() : [];
+    if (!list.length) {
+      const r3 = await fetch(API + '/search?q=' + encodeURIComponent(artist + ' ' + track.name));
+      list = r3.ok ? await r3.json() : [];
+    }
+    if (!list.length) return null;
+    const dur = track.duration_ms / 1000;
+    list.sort((a, b) => (!!b.syncedLyrics - !!a.syncedLyrics) || (Math.abs(a.duration - dur) - Math.abs(b.duration - dur)));
+    return list[0];
+  }
+
+  function applySpotifyClock(d, fetchedAt) {
+    baseTime = spotifyPosition(d.progress_ms || 0, d.is_playing, fetchedAt, Date.now());
+    baseWall = performance.now();
+    if (d.is_playing && !playing) startPlayback();
+    else if (!d.is_playing && playing) { playing = false; cancelAnimationFrame(rafId); updatePlayBtn(); }
+    if (!playing) { updateClock(); if (isSynced) highlight(findActiveIndex(effectivePos()), false); }
+  }
+
+  async function handlePlayback(d, fetchedAt) {
+    const t = d && d.item;
+    if (!t || d.currently_playing_type !== 'track') {
+      setStatus('🎵 Spotify 연결됨 · 지금 재생 중인 곡이 없어요', true);
+      return;
+    }
+    const artist = t.artists.map((a) => a.name).join(', ');
+    setStatus('🎵 Spotify 연결됨 · ' + (d.is_playing ? '재생 중' : '일시정지') + ' · ' + t.name + ' — ' + artist, true);
+    if (t.id !== spTrackId && !spLoading) {
+      spTrackId = t.id; spLoading = true;
+      try {
+        const data = await lrclibLookup(t);
+        if (data) showSongData(data);
+        else {
+          showSongData({ id: 'sp:' + t.id, trackName: t.name, artistName: artist,
+            albumName: t.album && t.album.name, duration: t.duration_ms / 1000,
+            plainLyrics: '(LRCLIB에서 가사를 찾지 못했어요)' });
+        }
+      } catch (e) { setStatus('가사 검색 오류: ' + e.message, true); }
+      spLoading = false;
+      fetchedAt = fetchedAt; // clock re-applied below with drift
+    }
+    if (currentSong) applySpotifyClock(d, fetchedAt);
+  }
+
+  async function spPoll() {
+    if (!spTokens) return;
+    try {
+      const tok = await ensureToken();
+      const fetchedAt = Date.now();
+      const res = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
+        headers: { Authorization: 'Bearer ' + tok },
+      });
+      if (res.status === 204) {
+        setStatus('🎵 Spotify 연결됨 · 지금 재생 중인 곡이 없어요', true);
+        if (playing) pausePlayback();
+        spDelay = 3000;
+      } else if (res.status === 429) {
+        const ra = parseInt(res.headers.get('Retry-After') || '5', 10);
+        spDelay = Math.min(60000, Math.max(ra * 1000, spDelay * 2));
+        setStatus('Spotify 요청 제한 — ' + Math.round(spDelay / 1000) + '초 후 재시도', true);
+      } else if (res.status === 401) {
+        spTokens.exp = 0; spDelay = 1000;
+      } else if (!res.ok) {
+        throw new Error('HTTP ' + res.status);
+      } else {
+        await handlePlayback(await res.json(), fetchedAt);
+        spDelay = 3000;
+      }
+    } catch (e) {
+      spDelay = Math.min(60000, spDelay * 2);
+      if (String(e.message).startsWith('토큰 오류')) { spDisconnect(); setStatus('Spotify 세션 만료 — 다시 연결하세요'); return; }
+      setStatus('Spotify 오류: ' + e.message + ' (재시도 ' + Math.round(spDelay / 1000) + '초)', true);
+    }
+    clearTimeout(spTimer);
+    if (spTokens) spTimer = setTimeout(spPoll, spDelay);
+  }
+
+  $('spBtn').addEventListener('click', spConnect);
+  $('spSettingsBtn').addEventListener('click', () => $('spSettings').classList.toggle('hidden'));
+  $('spClientId').value = localStorage.getItem(SP_LS.cid) || SPOTIFY_CLIENT_ID;
+  $('spRedirect').textContent = redirectUri();
+  $('spSaveId').addEventListener('click', () => {
+    localStorage.setItem(SP_LS.cid, $('spClientId').value.trim());
+    $('spSettings').classList.add('hidden');
+    setStatus('Client ID 저장됨 — 🎵 Spotify 연결을 누르세요');
+  });
+  window.__spotify = { codeChallenge, randomVerifier, spotifyPosition, lrclibLookup, handlePlayback, redirectUri };
+  handleRedirect().then(() => { updateSpUi(); if (spTokens) { setStatus('🎵 Spotify 연결됨 · 확인 중…', true); spPoll(); } });
 
   // Init
   renderRecent();
