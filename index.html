@@ -182,9 +182,41 @@
       font-weight: 700;
       opacity: 1;
       transform: scale(1.02);
+    }
+    .lyric-line.active .lyric-text {
       text-shadow: 0 0 24px rgba(29, 185, 84, 0.35);
     }
     .lyric-line:active { background: rgba(255,255,255,0.05); border-radius: 12px; }
+    .lyric-text { display: block; }
+    .lyric-tr {
+      display: block;
+      font-size: 0.58em;
+      font-weight: 400;
+      color: #7a7a7a;
+      margin-top: 6px;
+      line-height: 1.35;
+      transition: color 0.25s;
+    }
+    .lyric-line.active .lyric-tr {
+      color: #d4d4d4;
+      font-weight: 500;
+    }
+    .lyric-line.near .lyric-tr { color: #8e8e8e; }
+    body.tr-off .lyric-tr { display: none !important; }
+    .plain-line {
+      text-align: center;
+      padding: 8px 32px;
+      font-size: var(--font-base);
+      line-height: 1.45;
+      color: var(--fg-mid);
+    }
+    .plain-line .lyric-tr { color: #7a7a7a; }
+    .tr-note {
+      font-size: 16px;
+      color: #666;
+      padding: 0 20px 6px;
+      min-height: 0;
+    }
     .plain-lyrics {
       white-space: pre-wrap;
       text-align: center;
@@ -311,9 +343,11 @@
           <div style="display:flex;gap:8px;flex-shrink:0">
             <button class="btn btn-ghost btn-sm" id="fontMinus" type="button" title="글자 작게">A−</button>
             <button class="btn btn-ghost btn-sm" id="fontPlus" type="button" title="글자 크게">A+</button>
+            <button class="btn btn-ghost btn-sm" id="trBtn" type="button">번역 끄기</button>
             <button class="btn btn-ghost btn-sm" id="fsBtn" type="button">⛶ 전체화면</button>
           </div>
         </div>
+        <div class="tr-note" id="trNote"></div>
         <div class="lyrics-viewport" id="lyricsViewport">
           <div class="lyrics-spacer"></div>
           <div id="lyricsBody"></div>
@@ -349,7 +383,10 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
   const LS_RECENT = 'lyrics_recent_v1';
   const LS_OFFSET = 'lyrics_offset_v1';
   const LS_FONT = 'lyrics_font_v1';
+  const LS_TR_ON = 'lyrics_tr_on_v1';
+  const LS_TR_CACHE = 'lyrics_tr_cache_v1';
   const MAX_RECENT = 12;
+  const MAX_TR_SONGS = 30;
 
   /** @typedef {{ time: number, text: string }} LyricLine */
   /** @typedef {{ id: number, title: string, artist: string, album: string, duration: number, synced: boolean, plainLyrics?: string, syncedLyrics?: string }} Song */
@@ -382,6 +419,8 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
     fontMinus: $('fontMinus'),
     fontPlus: $('fontPlus'),
     fsBtn: $('fsBtn'),
+    trBtn: $('trBtn'),
+    trNote: $('trNote'),
   };
 
   let currentSong = null;
@@ -702,7 +741,7 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
         const div = document.createElement('div');
         div.className = 'lyric-line';
         div.dataset.idx = String(i);
-        div.textContent = line.text || '♪';
+        fillLineContent(div, line.text || '♪');
         div.addEventListener('click', () => seekToLine(i));
         body.appendChild(div);
       });
@@ -711,10 +750,15 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
       const note = document.createElement('div');
       note.className = 'plain-note';
       note.textContent = '싱크 가사가 없어 일반 가사를 표시합니다';
+      body.appendChild(note);
       const plain = document.createElement('div');
       plain.className = 'plain-lyrics';
-      plain.textContent = plainText;
-      body.appendChild(note);
+      String(plainText).split('\n').forEach((row) => {
+        const div = document.createElement('div');
+        div.className = 'plain-line';
+        fillLineContent(div, row);
+        plain.appendChild(div);
+      });
       body.appendChild(plain);
     } else {
       vp.classList.add('plain-mode');
@@ -744,6 +788,180 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
       body.appendChild(wrap);
     }
     vp.scrollTop = 0;
+    if (els.trNote) els.trNote.textContent = '';
+    scheduleTranslations();
+  }
+
+  function fillLineContent(el, text) {
+    const src = text || '';
+    const textEl = document.createElement('div');
+    textEl.className = 'lyric-text';
+    textEl.textContent = src || '♪';
+    el.appendChild(textEl);
+    if (isMostlyEnglish(src)) el.dataset.trSrc = src;
+  }
+
+  function isMostlyEnglish(text) {
+    const s = String(text || '').trim();
+    if (!s) return false;
+    const hangul = (s.match(/[\uAC00-\uD7A3]/g) || []).length;
+    const latin = (s.match(/[A-Za-z]/g) || []).length;
+    if (latin < 3) return false;
+    return hangul === 0 || latin > hangul;
+  }
+
+  let trOn = true;
+  try { if (localStorage.getItem(LS_TR_ON) === '0') trOn = false; } catch (e) {}
+  let trGen = 0;
+
+  function updateTrBtn() {
+    if (!els.trBtn) return;
+    els.trBtn.textContent = trOn ? '번역 끄기' : '번역 켜기';
+    document.body.classList.toggle('tr-off', !trOn);
+  }
+
+  function loadTrCache() {
+    try { return JSON.parse(localStorage.getItem(LS_TR_CACHE) || '{}'); }
+    catch (e) { return {}; }
+  }
+  function songTrMap(songId) {
+    const all = loadTrCache();
+    const rec = all[String(songId)] || {};
+    return rec.map || rec; // tolerate older shape
+  }
+  function saveTrMap(songId, map) {
+    const all = loadTrCache();
+    all[String(songId)] = { map: map, t: Date.now() };
+    const ids = Object.keys(all).sort((a, b) => (all[b].t || 0) - (all[a].t || 0));
+    ids.slice(MAX_TR_SONGS).forEach((id) => { delete all[id]; });
+    try { localStorage.setItem(LS_TR_CACHE, JSON.stringify(all)); } catch (e) {}
+  }
+
+  function applyTranslations(map) {
+    els.lyricsBody.querySelectorAll('[data-tr-src]').forEach((el) => {
+      const src = el.getAttribute('data-tr-src');
+      const tr = map[src];
+      let trEl = el.querySelector('.lyric-tr');
+      if (tr && trOn) {
+        if (!trEl) {
+          trEl = document.createElement('div');
+          trEl.className = 'lyric-tr';
+          el.appendChild(trEl);
+        }
+        trEl.textContent = tr;
+      } else if (trEl) {
+        trEl.remove();
+      }
+    });
+    if (isSynced && activeIdx >= 0) highlight(activeIdx, true);
+  }
+
+  function chunkByEncoded(texts, maxEncoded) {
+    const chunks = [];
+    let cur = [];
+    let len = 0;
+    texts.forEach((text) => {
+      const add = encodeURIComponent((cur.length ? '\n' : '') + text).length;
+      if (cur.length && len + add > maxEncoded) {
+        chunks.push(cur);
+        cur = [];
+        len = 0;
+      }
+      len += encodeURIComponent((cur.length ? '\n' : '') + text).length;
+      cur.push(text);
+    });
+    if (cur.length) chunks.push(cur);
+    return chunks;
+  }
+
+  function parseGtx(json, inputLines) {
+    const segs = (json && json[0]) || [];
+    const joined = segs.map((s) => (s && s[0]) || '').join('');
+    const out = joined.replace(/\n$/, '').split('\n');
+    if (out.length === inputLines.length) return out;
+    return null;
+  }
+
+  async function translateGtx(lines) {
+    const q = lines.join('\n');
+    const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=' + encodeURIComponent(q);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('gtx ' + r.status);
+    const parsed = parseGtx(await r.json(), lines);
+    if (parsed) return parsed;
+    if (lines.length === 1) throw new Error('gtx align');
+    const out = [];
+    for (const line of lines) {
+      const one = await translateGtx([line]);
+      out.push(one[0]);
+    }
+    return out;
+  }
+
+  async function translateMyMemory(lines) {
+    const out = [];
+    // 500-byte request cap: one or few short lines per call
+    const chunks = chunkByEncoded(lines, 400);
+    for (const ch of chunks) {
+      const url = 'https://api.mymemory.translated.net/get?langpair=en|ko&q=' + encodeURIComponent(ch.join('\n'));
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('mymemory ' + r.status);
+      const j = await r.json();
+      const text = j && j.responseData && j.responseData.translatedText;
+      if (!text || /MYMEMORY WARNING|INVALID LANGUAGE|QUERY LENGTH/i.test(text)) throw new Error('mymemory quota');
+      const parts = String(text).replace(/\n$/, '').split('\n');
+      if (parts.length !== ch.length) throw new Error('mymemory align');
+      out.push.apply(out, parts);
+    }
+    return out;
+  }
+
+  async function translateChunk(lines) {
+    try {
+      return await translateGtx(lines);
+    } catch (e) {
+      return await translateMyMemory(lines);
+    }
+  }
+
+  function scheduleTranslations() {
+    if (!trOn || !currentSong) return;
+    const gen = ++trGen;
+    translateCurrent(gen).catch(() => {});
+  }
+
+  async function translateCurrent(gen) {
+    const songId = currentSong && currentSong.id;
+    if (songId == null) return;
+    const needed = [];
+    els.lyricsBody.querySelectorAll('[data-tr-src]').forEach((el) => {
+      const src = el.getAttribute('data-tr-src');
+      if (src && needed.indexOf(src) < 0) needed.push(src);
+    });
+    if (!needed.length) return;
+    const map = Object.assign({}, songTrMap(songId));
+    const missing = needed.filter((s) => !map[s]);
+    if (needed.some((s) => map[s])) applyTranslations(map);
+    if (!missing.length) return;
+    const chunks = chunkByEncoded(missing, 1600);
+    let failed = 0;
+    for (const ch of chunks) {
+      if (gen !== trGen) return;
+      try {
+        const trs = await translateChunk(ch);
+        ch.forEach((src, i) => { if (trs[i]) map[src] = trs[i]; });
+        if (gen !== trGen) return;
+        saveTrMap(songId, map);
+        applyTranslations(map);
+      } catch (e) {
+        failed++;
+      }
+    }
+    if (gen !== trGen) return;
+    const still = needed.filter((s) => !map[s]);
+    if (still.length && failed && els.trNote && !needed.some((s) => map[s])) {
+      els.trNote.textContent = '번역을 불러오지 못했어요';
+    }
   }
 
   function seekToLine(i) {
@@ -925,6 +1143,14 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
     applyFont();
   });
   els.fsBtn.addEventListener('click', toggleFullscreen);
+  updateTrBtn();
+  els.trBtn.addEventListener('click', () => {
+    trOn = !trOn;
+    try { localStorage.setItem(LS_TR_ON, trOn ? '1' : '0'); } catch (e) {}
+    updateTrBtn();
+    if (trOn) scheduleTranslations();
+    else if (isSynced && activeIdx >= 0) highlight(activeIdx, true);
+  });
 
 
   // ---------- Spotify auto-sync (PKCE) ----------
@@ -1232,6 +1458,7 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
   renderRecent();
 
   // Node/test hook
+  window.__translate = { isMostlyEnglish, parseGtx, chunkByEncoded, translateGtx, translateMyMemory, translateChunk };
   window.__lyricsApp = { parseLRC, formatTime, findActiveIndex: (pos, ls) => {
     const prev = lines; lines = ls || lines;
     const r = findActiveIndex(pos);
