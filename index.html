@@ -191,7 +191,38 @@
       font-size: var(--font-base);
       line-height: 1.8;
       color: var(--fg-mid);
-      padding: 40px 32px 120px;
+      padding: 16px 32px 80px;
+    }
+    .lyrics-viewport.plain-mode {
+      mask-image: none;
+      -webkit-mask-image: none;
+    }
+    .lyrics-viewport.plain-mode .lyrics-spacer { display: none; }
+    .plain-note {
+      text-align: center;
+      font-size: 20px;
+      color: var(--fg-dim);
+      padding: 24px 24px 8px;
+    }
+    .lyrics-empty {
+      min-height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 48px 32px;
+      gap: 28px;
+    }
+    .lyrics-empty .msg {
+      font-size: 40px;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.4;
+    }
+    .lyrics-empty .sub {
+      font-size: 22px;
+      color: var(--fg-mid);
     }
 
     /* Controls */
@@ -562,6 +593,7 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
       album: r.albumName || '',
       duration: r.duration || 0,
       synced: !!(r.syncedLyrics) || r.hasSyncedLyrics === true,
+      missing: r.missing === true,
       plainLyrics: r.plainLyrics || null,
       syncedLyrics: r.syncedLyrics || null,
     };
@@ -660,8 +692,12 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
 
   function renderLyrics() {
     const body = els.lyricsBody;
+    const vp = els.lyricsViewport;
     body.innerHTML = '';
+    const plainText = currentSong && currentSong.plainLyrics;
+    const missing = !isSynced && (!plainText || (currentSong && currentSong.missing));
     if (isSynced) {
+      vp.classList.remove('plain-mode');
       lines.forEach((line, i) => {
         const div = document.createElement('div');
         div.className = 'lyric-line';
@@ -670,13 +706,44 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
         div.addEventListener('click', () => seekToLine(i));
         body.appendChild(div);
       });
-    } else {
+    } else if (!missing) {
+      vp.classList.add('plain-mode');
+      const note = document.createElement('div');
+      note.className = 'plain-note';
+      note.textContent = '싱크 가사가 없어 일반 가사를 표시합니다';
       const plain = document.createElement('div');
       plain.className = 'plain-lyrics';
-      plain.textContent = (currentSong && currentSong.plainLyrics) || '(가사가 없습니다)';
+      plain.textContent = plainText;
+      body.appendChild(note);
       body.appendChild(plain);
+    } else {
+      vp.classList.add('plain-mode');
+      const wrap = document.createElement('div');
+      wrap.className = 'lyrics-empty';
+      const msg = document.createElement('div');
+      msg.className = 'msg';
+      msg.textContent = '이 곡은 가사를 찾지 못했어요';
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = '다른 제목이나 아티스트 표기로 직접 검색해 보세요';
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-primary';
+      btn.type = 'button';
+      btn.style.cssText = 'min-width:280px;height:72px;font-size:22px';
+      btn.textContent = '직접 검색하기';
+      btn.addEventListener('click', () => {
+        const q = [currentSong && currentSong.title, currentSong && currentSong.artist]
+          .filter(Boolean).join(' ');
+        els.searchInput.value = q;
+        showSearch();
+        doSearch();
+      });
+      wrap.appendChild(msg);
+      wrap.appendChild(sub);
+      wrap.appendChild(btn);
+      body.appendChild(wrap);
     }
-    els.lyricsViewport.scrollTop = 0;
+    vp.scrollTop = 0;
   }
 
   function seekToLine(i) {
@@ -966,27 +1033,121 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
     localStorage.removeItem(SP_LS.ver); localStorage.removeItem(SP_LS.st);
   }
 
+  function cleanTitle(s) {
+    return String(s || '')
+      .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, ' ')
+      .replace(/\s*[-–—]\s*(feat\.?|ft\.?|with)\b.*$/i, '')
+      .replace(/\s+(feat\.?|ft\.?|featuring)\b.*$/i, '')
+      .replace(/\s+(re-?master(ed)?(\s+\d{4})?|radio edit|deluxe|explicit|clean version)\b.*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  function compactText(s) {
+    return String(s || '').replace(/\s+/g, '');
+  }
+  function titleVariants(s) {
+    const raw = String(s || '').trim();
+    const cleaned = cleanTitle(raw);
+    const out = [];
+    const add = (x) => { if (x) out.push(x); };
+    add(raw); add(cleaned); add(compactText(raw)); add(compactText(cleaned));
+    const re = /[\(\[]([^\)\]]+)[\)\]]/g;
+    let m;
+    while ((m = re.exec(raw))) add(m[1].trim());
+    return [...new Set(out.map((x) => compactText(x).toLowerCase()).filter(Boolean))];
+  }
+  function titlesMatch(a, b) {
+    const A = titleVariants(a), B = titleVariants(b);
+    return A.some((x) => B.some((y) => x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x)))));
+  }
+  function hasLyrics(j) {
+    return !!(j && ((j.syncedLyrics && String(j.syncedLyrics).trim()) || (j.plainLyrics && String(j.plainLyrics).trim())));
+  }
+  function pickBestLrc(list, track) {
+    const dur = (track.duration_ms || 0) / 1000;
+    const title = track.name || '';
+    const scored = (list || []).map((item) => {
+      const tname = item.trackName || item.name || '';
+      const titleOk = titlesMatch(tname, title);
+      const durOk = dur && item.duration && Math.abs(item.duration - dur) <= 3;
+      if (!titleOk) return null; // artist may be romanized; only trust a title match
+      let score = durOk ? 100 : 40;
+      if (item.syncedLyrics) score += 5;
+      else if (item.plainLyrics) score += 2;
+      return { item, score };
+    }).filter(Boolean);
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    return best && hasLyrics(best.item) ? best.item : null;
+  }
+
+  async function lrclibGet(params) {
+    const r = await fetch(API + '/get?' + new URLSearchParams(params));
+    if (!r.ok) return null;
+    const j = await r.json();
+    return hasLyrics(j) ? j : null;
+  }
+  async function lrclibSearch(params) {
+    const r = await fetch(API + '/search?' + new URLSearchParams(params));
+    if (!r.ok) return [];
+    const j = await r.json();
+    return Array.isArray(j) ? j : [];
+  }
+
   async function lrclibLookup(track) {
     const artist = (track.artists || []).map((a) => a.name)[0] || '';
-    const q = new URLSearchParams({
-      track_name: track.name, artist_name: artist,
-      album_name: (track.album && track.album.name) || '',
-      duration: String(Math.round(track.duration_ms / 1000)),
-    });
-    try {
-      const r = await fetch(API + '/get?' + q);
-      if (r.ok) { const j = await r.json(); if (j && (j.syncedLyrics || j.plainLyrics)) return j; }
-    } catch {}
-    const r2 = await fetch(API + '/search?' + new URLSearchParams({ track_name: track.name, artist_name: artist }));
-    let list = r2.ok ? await r2.json() : [];
-    if (!list.length) {
-      const r3 = await fetch(API + '/search?q=' + encodeURIComponent(artist + ' ' + track.name));
-      list = r3.ok ? await r3.json() : [];
+    const album = (track.album && track.album.name) || '';
+    const dur = Math.round((track.duration_ms || 0) / 1000);
+    const rawTitle = track.name || '';
+    const title = cleanTitle(rawTitle) || rawTitle;
+    const artistClean = cleanTitle(artist) || artist;
+    const compactTitle = compactText(title);
+
+    const getPairs = [
+      [rawTitle, artist], [title, artist], [title, artistClean], [rawTitle, artistClean],
+    ];
+    const seenGet = new Set();
+    for (const [tn, an] of getPairs) {
+      if (!tn || !an) continue;
+      const key = tn + '\0' + an + '\0' + album + '\0' + dur;
+      if (seenGet.has(key)) continue;
+      seenGet.add(key);
+      try {
+        const hit = await lrclibGet({
+          track_name: tn, artist_name: an,
+          album_name: album, duration: String(dur || ''),
+        });
+        if (hit) return hit;
+      } catch {}
     }
-    if (!list.length) return null;
-    const dur = track.duration_ms / 1000;
-    list.sort((a, b) => (!!b.syncedLyrics - !!a.syncedLyrics) || (Math.abs(a.duration - dur) - Math.abs(b.duration - dur)));
-    return list[0];
+
+    const queries = [
+      { track_name: rawTitle, artist_name: artist },
+      { track_name: title, artist_name: artistClean },
+      { q: (artist + ' ' + title).trim() },
+      { q: title },
+      { track_name: title },
+      { q: compactTitle },
+      { track_name: compactTitle },
+    ];
+    const list = [];
+    const seen = new Set();
+    for (const q of queries) {
+      try {
+        const rows = await lrclibSearch(q);
+        for (const item of rows) {
+          if (item && item.id != null && !seen.has(item.id)) {
+            seen.add(item.id);
+            list.push(item);
+          }
+        }
+      } catch {}
+    }
+    // Prefer title matches with duration ±3s (helps when LRCLIB artist is romanized)
+    const picked = pickBestLrc(list, track);
+    if (picked) return picked;
+    // Track-only already included; if anything remains with title+duration, pickBest handled it
+    return null;
   }
 
   function applySpotifyClock(d, fetchedAt) {
@@ -1013,7 +1174,7 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
         else {
           showSongData({ id: 'sp:' + t.id, trackName: t.name, artistName: artist,
             albumName: t.album && t.album.name, duration: t.duration_ms / 1000,
-            plainLyrics: '(LRCLIB에서 가사를 찾지 못했어요)' });
+            missing: true });
         }
       } catch (e) { setStatus('가사 검색 오류: ' + e.message, true); }
       spLoading = false;
@@ -1064,7 +1225,7 @@ const SPOTIFY_CLIENT_ID = 'ec2216b3123e4e488e15e94300439054';
     $('spSettings').classList.add('hidden');
     setStatus('Client ID 저장됨 — 🎵 Spotify 연결을 누르세요');
   });
-  window.__spotify = { codeChallenge, randomVerifier, spotifyPosition, lrclibLookup, handlePlayback, redirectUri };
+  window.__spotify = { codeChallenge, randomVerifier, spotifyPosition, lrclibLookup, handlePlayback, redirectUri, cleanTitle, titlesMatch, pickBestLrc, compactText };
   handleRedirect().then(() => { updateSpUi(); if (spTokens) { setStatus('🎵 Spotify 연결됨 · 확인 중…', true); spPoll(); } });
 
   // Init
